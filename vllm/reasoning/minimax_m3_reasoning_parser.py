@@ -42,44 +42,13 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         self._initial_in_reasoning = chat_kwargs.get("thinking_mode") == "enabled"
         self._reasoning_ended_streaming = False
-        self._reasoning_active_streaming = self._initial_in_reasoning
-        self._pending_marker_streaming = False
-        self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
-        self._last_streaming_content_token_ids: list[int] | None = None
-
-    def _encode_text(self, text: str) -> list[int]:
-        try:
-            return list(self.model_tokenizer.encode(text, add_special_tokens=False))
-        except TypeError:
-            return list(self.model_tokenizer.encode(text))
 
     def _encode_marker(self, marker: str) -> tuple[int, ...]:
-        return tuple(self._encode_text(marker))
-
-    def _decode_text(self, token_ids: Sequence[int]) -> str:
         try:
-            return self.model_tokenizer.decode(
-                list(token_ids), skip_special_tokens=False
-            )
+            token_ids = self.model_tokenizer.encode(marker, add_special_tokens=False)
         except TypeError:
-            return self.model_tokenizer.decode(list(token_ids))
-
-    def _content_suffix_token_ids(
-        self,
-        delta_text: str,
-        delta_token_ids: Sequence[int],
-        content: str | None,
-    ) -> list[int]:
-        if content is None:
-            return []
-        if content == delta_text:
-            return list(delta_token_ids)
-        if delta_text.endswith(content):
-            prefix_text = delta_text[: len(delta_text) - len(content)]
-            for index in range(len(delta_token_ids) + 1):
-                if self._decode_text(delta_token_ids[:index]) == prefix_text:
-                    return list(delta_token_ids[index:])
-        return self._encode_text(content)
+            token_ids = self.model_tokenizer.encode(marker)
+        return tuple(token_ids)
 
     @staticmethod
     def _contains_token_sequence(
@@ -137,35 +106,92 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         return current
 
     def _visible_segments(self, text: str) -> tuple[str | None, str | None]:
+        """Split text into (reasoning_content, content).
+
+        Returns a tuple of (reasoning, content) where:
+        - reasoning is the text between <mm:think> and </mm:think> tags
+        - content is the text after the end tag (or before the start tag if no reasoning was started)
+
+        Strategy:
+        1. If text contains only the end marker or is shorter than it, return (None, None)
+        2. If we're NOT initially in reasoning (no start tag emitted):
+           - If text starts with end marker, skip it
+           - If text doesn't contain start marker, everything is content
+        3. If we ARE initially in reasoning:
+           - If text doesn't contain start marker, everything before end marker is reasoning
+           - If text contains start marker, everything after it is reasoning, everything before is content
+        4. If text contains start marker:
+           - Everything after start marker is reasoning
+           - Everything before start marker is content
+           - If end marker is found after start marker, everything after end marker is content too
+        """
         if not text:
             return None, None
 
+        # If text only contains partially visible markers, return (None, None)
+        if len(text) < len(self.start_token) and self.start_token.startswith(text):
+            return None, None
+        if len(text) < len(self.end_token) and self.end_token.startswith(text):
+            return None, None
+
+        # If NOT initially in reasoning
         if not self._initial_in_reasoning:
-            if self.end_token.startswith(text) and len(text) < len(self.end_token):
-                return None, None
+            # Skip a stray end marker at the beginning (non-starting tag)
             if text.startswith(self.end_token):
-                text = text[len(self.end_token) :]
+                text = text[len(self.end_token):]
                 if not text:
                     return None, None
 
-        if self._initial_in_reasoning and self.start_token not in text:
-            reasoning, end, content = text.partition(self.end_token)
-            if end:
-                return reasoning or None, content or None
-            reasoning = self._strip_partial_marker_suffix(reasoning, self.end_token)
-            return reasoning or None, None
+            # If start marker not found, all content
+            if self.start_token not in text:
+                content_after = self._strip_partial_marker_suffix(
+                    text, self.start_token
+                )
+                return None, content_after or None
 
+            # Get content before <mm:think>
+            content_before, _, m_content_between = text.partition(self.start_token)
+
+            # Split between <mm:think> and </mm:think>
+            reasoning_between, end_found, m_content_after = m_content_between.partition(
+                self.end_token
+            )
+
+            if end_found:
+                return reasoning_between or None, (content_before + m_content_after) or None
+
+            # End not found yet - reasoning is ongoing
+            reasoning_stripped = self._strip_partial_marker_suffix(
+                reasoning_between, self.end_token
+            )
+            return reasoning_stripped or None, content_before or None
+
+        # Initially IN reasoning (start tag already emitted by chat template)
         if self.start_token not in text:
-            content = self._strip_partial_marker_suffix(text, self.start_token)
-            return None, content or None
+            reason_between, end_found, rest_after = text.partition(self.end_token)
+            if end_found:
+                return reason_between or None, rest_after or None
 
-        content_before, _, after_start = text.partition(self.start_token)
-        reasoning, end, content_after = after_start.partition(self.end_token)
-        if end:
-            return reasoning or None, (content_before + content_after) or None
+            # End not found yet - still in reasoning
+            reason_between_stripped = self._strip_partial_marker_suffix(
+                reason_between, self.end_token
+            )
+            return reason_between_stripped or None, None
 
-        reasoning = self._strip_partial_marker_suffix(reasoning, self.end_token)
-        return reasoning or None, content_before or None
+        # Have both start and potentially end markers
+        content_before, _, m_content_between = text.partition(self.start_token)
+        reason_between, end_found, m_after_end = m_content_between.partition(
+            self.end_token
+        )
+
+        if end_found:
+            return reason_between or None, (content_before + m_after_end) or None
+
+        # End not found yet - reasoning is ongoing
+        reason_between_stripped = self._strip_partial_marker_suffix(
+            reason_between, self.end_token
+        )
+        return reason_between_stripped or None, content_before or None
 
     def extract_reasoning(
         self,
@@ -175,33 +201,34 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         # MiniMax M3 can start a response with a stray closer. Drop that first
         # token only; later unmatched closers stay visible as content.
         if not self._initial_in_reasoning and model_output.startswith(self.end_token):
-            content = model_output[len(self.end_token) :]
-            return None, content or None
+            content_remaining = model_output[len(self.end_token) :]
+            return None, content_remaining or None
 
         if self._initial_in_reasoning and self.start_token not in model_output:
-            reasoning, end, content = model_output.partition(self.end_token)
-            if not end:
+            reasoning_between, end_found, content_remaining = model_output.partition(
+                self.end_token
+            )
+            if not end_found:
                 return model_output, None
-            return reasoning, content or None
+            return reasoning_between, content_remaining or None
 
         if self.start_token not in model_output:
             return None, model_output
 
         content_before, _, after_start = model_output.partition(self.start_token)
-        reasoning, end, content_after = after_start.partition(self.end_token)
-        if not end:
-            return reasoning, content_before or None
+        reasoning_between, end_found, content_after = after_start.partition(
+            self.end_token
+        )
+        if not end_found:
+            return reasoning_between, content_before or None
 
-        return reasoning, (content_before + content_after) or None
+        return reasoning_between, (content_before + content_after) or None
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         if self._reasoning_ended_streaming:
             return True
-
-        if self._reasoning_active_streaming or self._pending_marker_streaming:
-            return False
 
         delta_ids = tuple(delta_ids)
         if self._contains_token_sequence(delta_ids, self._end_token_ids):
@@ -219,15 +246,6 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        if (
-            self._last_streaming_delta_token_ids == tuple(input_ids)
-            and self._last_streaming_content_token_ids is not None
-        ):
-            content_ids = self._last_streaming_content_token_ids
-            self._last_streaming_delta_token_ids = None
-            self._last_streaming_content_token_ids = None
-            return list(content_ids)
-
         end_index = self._rfind_token_sequence(input_ids, self._end_token_ids)
         if end_index >= 0:
             return input_ids[end_index + len(self._end_token_ids) :]
@@ -254,56 +272,40 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
 
         if not previous_text:
             self._reasoning_ended_streaming = False
-            self._reasoning_active_streaming = self._initial_in_reasoning
-            self._pending_marker_streaming = False
-            self._last_streaming_delta_token_ids = None
-            self._last_streaming_content_token_ids = None
+
         previous_reasoning, previous_content = self._visible_segments(previous_text)
         current_reasoning, current_content = self._visible_segments(current_text)
-        if self.end_token in current_text or current_content is not None:
+
+        if current_content is not None or self.end_token in current_text:
             self._reasoning_ended_streaming = True
-            self._reasoning_active_streaming = False
-            self._pending_marker_streaming = False
-        else:
-            self._last_streaming_delta_token_ids = None
-            self._last_streaming_content_token_ids = None
-            self._reasoning_active_streaming = (
-                self._initial_in_reasoning
-                or self.start_token in current_text
-                or current_reasoning is not None
-            )
-            self._pending_marker_streaming = not self._reasoning_active_streaming and (
-                self.start_token.startswith(current_text)
-                or self.end_token.startswith(current_text)
-            )
+
         reasoning = self._visible_delta(previous_reasoning, current_reasoning)
-        content = self._visible_delta(previous_content, current_content)
-        if self._reasoning_ended_streaming:
-            self._last_streaming_delta_token_ids = tuple(delta_token_ids)
-            self._last_streaming_content_token_ids = self._content_suffix_token_ids(
-                delta_text, delta_token_ids, content
-            )
-        if reasoning is None and content is None:
+        content_delta = self._visible_delta(previous_content, current_content)
+
+        if reasoning is None and content_delta is None:
             return None
-        return DeltaMessage(reasoning=reasoning, content=content)
+
+        return DeltaMessage(reasoning=reasoning, content=content_delta)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         count = 0
         depth = 1 if self._initial_in_reasoning else 0
         i = 0
         while i < len(token_ids):
-            if tuple(token_ids[i : i + len(self._start_token_ids)]) == (
+            start_len = len(self._start_token_ids)
+            end_len = len(self._end_token_ids)
+            if start_len > 0 and tuple(token_ids[i : i + start_len]) == (
                 self._start_token_ids
             ):
                 depth += 1
-                i += len(self._start_token_ids)
+                i += start_len
                 continue
-            if tuple(token_ids[i : i + len(self._end_token_ids)]) == (
+            if end_len > 0 and tuple(token_ids[i : i + end_len]) == (
                 self._end_token_ids
             ):
                 if depth > 0:
                     depth -= 1
-                i += len(self._end_token_ids)
+                i += end_len
                 continue
             if depth > 0:
                 count += 1
@@ -311,10 +313,28 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         return count
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        start_index = self._rfind_token_sequence(input_ids, self._start_token_ids)
+        """Check if reasoning has ended in the given token sequence.
+
+        Only returns True when the end marker is at the very end of the
+        sequence (e.g. thinking_mode="disabled" where the chat template
+        appends </think> as the prompt prefix).  End markers buried in
+        the middle of the prompt (system-message instructions mentioning
+        the tags) are correctly ignored.
+        """
         end_index = self._rfind_token_sequence(input_ids, self._end_token_ids)
         if end_index < 0:
             return False
-        if start_index < 0:
+
+        # Anything after the end marker?
+        after_end = input_ids[end_index + len(self._end_token_ids):]
+        if not after_end:
+            # End marker is the last token → reasoning ended (disabled prefix)
             return True
-        return end_index > start_index
+
+        # If a start marker appears after the end marker, a new block started
+        if self._contains_token_sequence(after_end, self._start_token_ids):
+            return False
+
+        # End marker is in the middle (e.g. system-message instructions).
+        # NOT a reasoning end — let the streaming logic decide.
+        return False
