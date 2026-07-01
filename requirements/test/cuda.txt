@@ -1357,7 +1357,7 @@ uvloop==0.22.1
     # via uvicorn
 vector-quantize-pytorch==1.21.2
     # via -r requirements/test/cuda.in
-virtualenv==20.31.2
+virtualenv==21.5.1
     # via ray
 vocos==0.1.0
     # via -r requirements/test/cuda.in
