@@ -28,6 +28,7 @@ nohup /data/deepgemm_sglang_vllm/vllmsource20260630/vllm/.venv/bin/python -m vll
     --limit-mm-per-prompt '{"video": 0, "image": {"count": 5, "width": 512, "height": 512}}' \
     --enable-prefix-caching \
     --enable-chunked-prefill \
+    --kv-offloading-size 64 \
     >> /root/JqLogs/coder.log 2>&1 &
 
 echo "PID: $!"
