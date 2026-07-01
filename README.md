@@ -19,6 +19,64 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 
 ---
 
+## Usage
+
+### Weights
+
+#### MiniMax-M3-NVFP4
+
+https://huggingface.co/nvidia/MiniMax-M3-NVFP4 
+
+https://modelscope.cn/models/migtissera/MiniMax-M3-NVFP4
+
+#### MiniMax-M3-EAGLE3
+https://huggingface.co/Inferact/MiniMax-M3-EAGLE3
+
+https://modelscope.cn/models/Inferact/MiniMax-M3-EAGLE3
+
+
+### Git & Installing
+```
+  git clone https://github.com/zhangjiekui/JQ4090-Vllm-Nvidia-MiniMax-M3-NVFP4.git
+  cd JQ4090-Vllm-Nvidia-MiniMax-M3-NVFP4
+  git checkout 37eed210e        # 切到带 patch 的 commit
+  # 然后照常 pip install -e . 跑服务
+```
+### Running on 8*48G 4090
+```
+bash /data/deepgemm_sglang_vllm/vllmsource20260630/vllm/start.sh
+```
+
+< ==  start.sh  == >
+```
+nohup /data/deepgemm_sglang_vllm/vllmsource20260630/vllm/.venv/bin/python -m vllm.entrypoints.openai.api_server \
+    --model /data/models/MiniMax-M3-NVFP4 \
+    --block-size 128 \
+    --tool-call-parser minimax_m3 \
+    --enable-auto-tool-choice \
+    --reasoning-parser minimax_m3 \
+    --kv-cache-dtype auto \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.9 \
+    --max-num-batched-tokens 8192 \
+    --max-model-len 202000 \
+    --max-num-seqs 8 \
+    --trust-remote-code \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --served-model-name coder \
+    --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 8}' \
+    --speculative-config '{"method": "eagle3", "model": "/data/models/MiniMax-M3-EAGLE3", "num_speculative_tokens": 3, "attention_backend": "FLASH_ATTN"}' \
+    --limit-mm-per-prompt '{"video": 0, "image": {"count": 5, "width": 512, "height": 512}}' \
+    --enable-prefix-caching \
+    --enable-chunked-prefill \
+    >> /root/JqLogs/coder.log 2>&1 &
+
+echo "PID: $!"
+echo "日志: tail -f /root/JqLogs/coder.log"
+echo "停止: pkill -f 'vllm.*MiniMax-M3-NVFP4'"
+```
+
 ## About
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
