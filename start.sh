@@ -15,7 +15,7 @@ nohup /data/deepgemm_sglang_vllm/vllmsource20260630/vllm/.venv/bin/python -m vll
     --reasoning-parser minimax_m3 \
     --kv-cache-dtype auto \
     --tensor-parallel-size 8 \
-    --gpu-memory-utilization 0.9 \
+    --gpu-memory-utilization 0.92 \
     --max-num-batched-tokens 8192 \
     --max-model-len 202000 \
     --max-num-seqs 8 \
